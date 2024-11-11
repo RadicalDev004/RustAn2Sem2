@@ -1,0 +1,3 @@
+{ "name": "Constantin", "phone": "0711111111", "age": 21 }
+{ "name": "Alex", "phone": "0711111121", "age": 20 }
+{ "name": "Matei", "phone": "0711111411", "age": 25 }
