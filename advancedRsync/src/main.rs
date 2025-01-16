@@ -11,6 +11,9 @@ use walkdir::WalkDir;
 use async_ftp::FtpStream;
 use std::sync::Arc; 
 use tokio::sync::Mutex;
+use std::fs::File;
+use zip::read::ZipArchive;
+use std::time::UNIX_EPOCH;
 
 //INFO PARSING
 #[derive(Debug)]
@@ -596,8 +599,6 @@ async fn sync_directories(directories: &[PathBuf], ftps: &mut [Ftp], watcher: &m
 
     let mut tracker: FileTracker = HashMap::new();
 
-
-
     for dir in directories {
         collect_files(dir, &mut tracker, watcher).await?;
     }
@@ -715,7 +716,74 @@ async fn sync_directories(directories: &[PathBuf], ftps: &mut [Ftp], watcher: &m
     
     Ok(())
 }
+async fn prepare_zip(zip_directories: &[PathBuf], directories: &[PathBuf]) -> std::io::Result<()>
+{
+  for dir in zip_directories {
+    let file = File::open(dir)?;
+    let mut archive = ZipArchive::new(file)?;
 
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let modified = file.last_modified();
+
+        for fld in directories {
+            fs::create_dir_all(fld).await?;
+            let output_path = fld.join(file.name());
+
+
+            if output_path.is_file() {
+                let metadata = fs::metadata(output_path.clone()).await?;
+                let flmodified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                if let Some(sys_modified) = zip_datetime_to_systemtime(modified) {
+                    println!("GOT ZIP TIME: {:?} compared to {:?}", sys_modified, flmodified);
+                    if flmodified < sys_modified {
+                        let mut output_file = File::create(&output_path)?;
+                        io::copy(&mut file, &mut output_file)?;
+                    }
+                }
+                
+            }
+            else {
+                let mut output_file = File::create(&output_path)?;
+                io::copy(&mut file, &mut output_file)?;
+            }
+        }
+
+        println!(
+            "Filename: {}\nSize: {} bytes\nLast Modified: {:?}\n",
+            file.name(), file.size(), modified
+        );
+    }
+  }
+  Ok(())
+}
+
+fn zip_datetime_to_systemtime(datetime: zip::DateTime) -> Option<SystemTime> {
+
+    let year = datetime.year() as i32;
+    let month = datetime.month();
+    let day = datetime.day();
+    let hour = datetime.hour();
+    let minute = datetime.minute();
+    let second = datetime.second();
+
+ 
+    if let (1..=12, 1..=31) = (month, day) {
+
+        if let Some(naive_date_time) = chrono::NaiveDate::from_ymd_opt(year, month.into(), day as u32)
+            .and_then(|date| date.and_hms_opt((hour - 2) as u32, minute as u32, second as u32))
+        {
+            let timestamp = naive_date_time.and_utc().timestamp();
+            println!("NAive date from zip: {}", timestamp);
+            if timestamp >= 0 {
+                return Some(UNIX_EPOCH + Duration::from_secs(timestamp as u64));
+            }
+        }
+    }
+
+    None 
+}
 
 #[tokio::main]
 async fn main()-> Result<(), Box<dyn std::error::Error>> {   
@@ -761,7 +829,7 @@ async fn main()-> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     
-    let _zip_paths: Vec<PathBuf> = all_locations
+    let zip_paths: Vec<PathBuf> = all_locations
         .values()
         .filter_map(|location| {
             if let LocationType::Zip(folder_path) = location {
@@ -770,7 +838,7 @@ async fn main()-> Result<(), Box<dyn std::error::Error>> {
                 None
             }
         })
-        .collect();
+    .collect();
     
     
     let mut ftp_paths: Vec<Ftp> = Vec::new();
@@ -796,6 +864,8 @@ async fn main()-> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\nFolders to synchronize:\n{:#?}", folder_paths);
+
+    prepare_zip(&zip_paths, &folder_paths).await?;
     
     loop {                
         println!("Syncing again...{}", folder_paths.len() + ftp_paths.len());
